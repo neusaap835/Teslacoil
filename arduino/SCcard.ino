@@ -4,7 +4,7 @@
  MOSI- pin 11 |
  MISO- pin 12 | These pins are connected to the hardware SPI-bus
  CLK- pin 13 |
- CS- pin 53- Chip Select pin can be chosen freely ; default is pin 10
+ CS- pin 53- Chip Select pin can be chosen freely ; default is pin 10 pins may differ for arduino mega
  See https://www.arduino.cc/en/reference/board
  */
  #include <SPI.h>
