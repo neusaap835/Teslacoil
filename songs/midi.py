@@ -103,8 +103,8 @@ def save_melody_array(events, output_file="melody_output.txt"):
         f.write("};\n")
 
 # === Run it ===
-midi_file = "imperial.mid"  # Replace with your file
-output_file = "imperial.txt"
+midi_file = "Crab_Rave.mid"  # Replace with your file
+output_file = "Crab_Rave.txt"
 
 events = parse_midi_monophonic_highest(midi_file)
 save_melody_array(events, output_file)
