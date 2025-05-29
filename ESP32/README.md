@@ -1,1 +1,1 @@
-all esp32 code
+Edit ESP32.ino to change the melody, BPM, and dutycycle. By default it picks a song from the "songs" directory.

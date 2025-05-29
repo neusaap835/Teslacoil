@@ -1,4 +1,6 @@
 import mido
+import argparse
+import os.path
 
 # MIDI note number to Arduino pitch string
 NOTE_NAMES = {
@@ -39,7 +41,8 @@ def ms_to_duration(ms, quarter_note_ms):
     else:
         return 16  # fallback
 
-# Parse MIDI and keep only the highest note at any time point
+# Parse MIDI and keep only the highest note at any time point.
+# This is a crude approximation to find the melody by removing bass notes
 def parse_midi_monophonic_highest(midi_file):
     mid = mido.MidiFile(midi_file)
     tempo = 500000  # default 120 BPM
@@ -72,7 +75,7 @@ def parse_midi_monophonic_highest(midi_file):
     # Sort events by start time
     events.sort(key=lambda x: x[0])
 
-    # Keep only highest note at each timestamp
+    # Keep only highest note at each timestamp.
     mono_events = []
     current_time = -1
     group = []
@@ -94,19 +97,31 @@ def parse_midi_monophonic_highest(midi_file):
 
     return mono_events
 
-# Save as Arduino melody array
+# Save as melody array
 def save_melody_array(events, output_file="melody_output.txt"):
     with open(output_file, "w") as f:
+        f.write('#include "notes.h"\n\n')
         f.write("int melody[] = {\n")
         for note, dur in events:
             f.write(f"  {note},{dur},\n")
         f.write("};\n")
 
-# === Run it ===
-midi_file = "Crab_Rave.mid"  # Replace with your file
-output_file = "Crab_Rave.txt"
+
+# Run it
+parser = argparse.ArgumentParser()
+parser.add_argument('input', help='MIDI file to process.')
+parser.add_argument('-o', help='Output filename.')
+args = parser.parse_args()
+
+midi_file = args.input
+if args.o:
+    output_file = args.o
+else:
+    # Remove ".mid" or ".midi" extension and replace with .txt
+    output_file = args.input.rsplit('.', 1)[0] + '.h'
 
 events = parse_midi_monophonic_highest(midi_file)
 save_melody_array(events, output_file)
 
-print(f"✅ Exported {len(events)} notes to '{output_file}'")
+print(f"\nExported {len(events)} notes")
+print(f"Output file: {output_file}")
