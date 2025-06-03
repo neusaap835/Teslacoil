@@ -1,0 +1,305 @@
+import librosa
+import numpy as np
+from dtw import dtw
+from scipy.spatial.distance import euclidean
+from scipy.signal import correlate
+import soundfile as sf
+import matplotlib.pyplot as plt
+import seaborn as sns
+import argparse
+
+def find_audio_alignment(y1, y2, sr, max_offset_seconds=15):
+    """
+    Find the best alignment between two audio signals using cross-correlation.
+    Returns the offset in samples (positive means y2 starts later than y1).
+    """
+    print("Finding audio alignment...")
+    
+    # Use shorter segments for faster computation (first 30 seconds)
+    max_samples = int(30 * sr)
+    y1_short = y1[:min(len(y1), max_samples)]
+    y2_short = y2[:min(len(y2), max_samples)]
+    
+    # Calculate cross-correlation
+    correlation = correlate(y1_short, y2_short, mode='full')
+    
+    # Find the lag with maximum correlation
+    lags = np.arange(-len(y2_short) + 1, len(y1_short))
+    max_corr_idx = np.argmax(correlation)
+    best_lag = lags[max_corr_idx]
+    
+    # Limit to reasonable offset range
+    max_offset_samples = int(max_offset_seconds * sr)
+    if abs(best_lag) > max_offset_samples:
+        print(f"Warning: Large offset detected ({best_lag/sr:.2f}s), limiting to {max_offset_seconds}s")
+        best_lag = np.clip(best_lag, -max_offset_samples, max_offset_samples)
+    
+    print(f"Best alignment: {best_lag/sr:.3f} seconds offset")
+    return best_lag
+
+
+def sync_and_trim_audio(y1, y2, sr):
+    """
+    Synchronize two audio signals and trim to overlapping region.
+    """
+    # Find alignment
+    offset = find_audio_alignment(y1, y2, sr)
+    
+    if offset > 0:
+        # y2 starts later than y1, so trim start of y1
+        y1_synced = y1[offset:]
+        y2_synced = y2.copy()
+        print(f"Trimmed {offset/sr:.3f}s from start of first audio")
+    elif offset < 0:
+        # y1 starts later than y2, so trim start of y2
+        y1_synced = y1.copy()
+        y2_synced = y2[-offset:]
+        print(f"Trimmed {-offset/sr:.3f}s from start of second audio")
+    else:
+        # Already aligned
+        y1_synced = y1.copy()
+        y2_synced = y2.copy()
+        print("Audio files already aligned")
+    
+    # Trim to same length (shorter of the two)
+    min_length = min(len(y1_synced), len(y2_synced))
+    y1_final = y1_synced[:min_length]
+    y2_final = y2_synced[:min_length]
+    
+    trimmed_duration = min_length / sr
+    print(f"Final synchronized duration: {trimmed_duration:.3f} seconds")
+    
+    return y1_final, y2_final
+
+
+def safe_cosine_similarity(v1, v2, epsilon=1e-8):
+    """
+    Calculate cosine similarity with numerical stability.
+    Returns 0 if either vector is zero or near-zero.
+    """
+    norm1 = np.linalg.norm(v1)
+    norm2 = np.linalg.norm(v2)
+    
+    # Check for zero or near-zero vectors
+    if norm1 < epsilon or norm2 < epsilon:
+        return 0.0
+    
+    return np.dot(v1, v2) / (norm1 * norm2)
+
+
+def analyze_accuracy(reference_file, recording_file, create_plots=True):
+    try:
+        # Load files with fixed duration to avoid corrupted metadata
+        print("Loading audio files...")
+        
+        # Load reference file normally
+        y_reference, sr = librosa.load(reference_file, sr=22050)
+        print(f"Loaded reference: {len(y_reference)} samples ({len(y_reference)/sr:.2f} seconds)")
+        
+        # Load recording file with duration limit to handle corrupted metadata
+        y_recording, sr = librosa.load(recording_file, sr=22050, duration=len(y_reference)/sr + 10)  # Add 10s buffer
+        print(f"Loaded recording: {len(y_recording)} samples ({len(y_recording)/sr:.2f} seconds)")
+        
+        # Synchronize and trim audio files
+        print("\n--- PREPROCESSING: Sync and Trim ---")
+        y_reference, y_recording = sync_and_trim_audio(y_reference, y_recording, sr)
+        
+        # Normalize amplitude
+        y_reference = librosa.util.normalize(y_reference)
+        y_recording = librosa.util.normalize(y_recording)
+        
+        
+        # Extract chroma features
+        print("Extracting chroma features...")
+        chroma_reference = librosa.feature.chroma_stft(y=y_reference, sr=sr, hop_length=512)
+        chroma_recording = librosa.feature.chroma_stft(y=y_recording, sr=sr, hop_length=512)
+        
+        print(f"Chroma shapes - reference: {chroma_reference.shape}, recording: {chroma_recording.shape}")
+        
+        # Use Dynamic Time Warping - try different DTW APIs
+        print("Computing DTW...")
+        # Method 1: dtw-python library
+        alignment = dtw(chroma_reference.T, chroma_recording.T, distance_only=False)
+        distance = alignment.distance
+        path = list(zip(alignment.index1, alignment.index2))
+        
+        # Calculate similarity score
+        similarity_score = distance / len(path)
+        
+        # Calculate correlation - use simple frame-by-frame if DTW path is not available
+        if hasattr(path, '__len__') and len(path) > 0 and hasattr(path[0], '__len__'):
+            # We have a proper DTW path
+            path_array = np.array(path)
+            aligned_reference = chroma_reference.T[path_array[:, 0]]
+            aligned_recording = chroma_recording.T[path_array[:, 1]]
+        else:
+            # Simple alignment - just trim to same length
+            min_frames = min(chroma_reference.shape[1], chroma_recording.shape[1])
+            aligned_reference = chroma_reference.T[:min_frames]
+            aligned_recording = chroma_recording.T[:min_frames]
+        
+        correlation = np.corrcoef(aligned_reference.flatten(), aligned_recording.flatten())[0,1]
+        
+        # Frame-by-frame cosine similarity with safety checks
+        min_frames = min(chroma_reference.shape[1], chroma_recording.shape[1])
+        cosine_similarities = []
+        zero_frames = 0
+        
+        for i in range(min_frames):
+            cos_sim = safe_cosine_similarity(chroma_reference[:, i], chroma_recording[:, i])
+            cosine_similarities.append(cos_sim)
+            
+            # Count frames with very low energy (might indicate silence)
+            if np.linalg.norm(chroma_reference[:, i]) < 1e-6 or np.linalg.norm(chroma_recording[:, i]) < 1e-6:
+                zero_frames += 1
+        
+        mean_cosine_similarity = np.mean(cosine_similarities)
+        
+        print(f"\nResults:")
+        print(f"DTW distance: {distance:.4f}")
+        print(f"Similarity score: {similarity_score:.4f} (lower is better)")
+        print(f"Correlation: {correlation:.4f} (higher is better)")
+        print(f"Mean cosine similarity: {mean_cosine_similarity:.4f} (higher is better)")
+        print(f"Frames with low/zero energy: {zero_frames}/{min_frames} ({100*zero_frames/min_frames:.1f}%)")
+        
+        if create_plots:
+            create_analysis_plots(y_reference, y_recording, chroma_reference, chroma_recording, 
+                                cosine_similarities, sr, correlation, mean_cosine_similarity, similarity_score)
+        
+        return similarity_score, correlation, mean_cosine_similarity, chroma_reference, chroma_recording
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def create_analysis_plots(y_reference, y_recording, chroma_reference, chroma_recording, cosine_similarities, sr, correlation, mean_cosine_similarity, similarity_score):
+    """Create comprehensive visualization plots"""
+    
+    fig = plt.figure(figsize=(16, 12))
+    
+    # Time axis for audio
+    time_audio = np.linspace(0, len(y_reference)/sr, len(y_reference))
+    time_chroma = np.linspace(0, len(y_reference)/sr, chroma_reference.shape[1])
+    time_cosine = np.linspace(0, len(y_reference)/sr, len(cosine_similarities))
+    
+    # 1. Waveform comparison
+    plt.subplot(3, 3, 1)
+    plt.plot(time_audio[:sr*10], y_reference[:sr*10], alpha=0.7, label='reference', linewidth=0.5)
+    plt.plot(time_audio[:sr*10], y_recording[:sr*10], alpha=0.7, label='recording', linewidth=0.5)
+    plt.title('Waveform Comparison (First 10s)')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Amplitude')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # 2. Chroma features - reference
+    plt.subplot(3, 3, 2)
+    librosa.display.specshow(chroma_reference, sr=sr, hop_length=512, x_axis='time', y_axis='chroma')
+    plt.title('reference Chroma Features')
+    plt.colorbar(format='%+2.0f dB')
+    
+    # 3. Chroma features - recording
+    plt.subplot(3, 3, 3)
+    librosa.display.specshow(chroma_recording, sr=sr, hop_length=512, x_axis='time', y_axis='chroma')
+    plt.title('Recording Chroma Features')
+    plt.colorbar(format='%+2.0f dB')
+    
+    # 4. Chroma difference
+    plt.subplot(3, 3, 4)
+    chroma_diff = np.abs(chroma_reference - chroma_recording)
+    librosa.display.specshow(chroma_diff, sr=sr, hop_length=512, x_axis='time', y_axis='chroma', cmap='Reds')
+    plt.title('Chroma Difference (Absolute)')
+    plt.colorbar()
+    
+    # 5. Cosine similarity over time
+    plt.subplot(3, 3, 5)
+    plt.plot(time_cosine, cosine_similarities, linewidth=1)
+    plt.axhline(y=mean_cosine_similarity, color='r', linestyle='--', label=f'Mean: {mean_cosine_similarity:.3f}')
+    plt.title('Cosine Similarity Over Time')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Cosine Similarity')
+    plt.ylim(0, 1)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # 6. Correlation scatter plot
+    plt.subplot(3, 3, 6)
+    min_frames = min(chroma_reference.shape[1], chroma_recording.shape[1])
+    reference_flat = chroma_reference[:, :min_frames].flatten()
+    recording_flat = chroma_recording[:, :min_frames].flatten()
+    
+    # Sample points for plotting (too many points make it slow)
+    sample_indices = np.random.choice(len(reference_flat), size=min(5000, len(reference_flat)), replace=False)
+    plt.scatter(reference_flat[sample_indices], recording_flat[sample_indices], alpha=0.3, s=1)
+    plt.plot([0, 1], [0, 1], 'r--', alpha=0.8)
+    plt.title(f'Chroma Correlation\nr = {correlation:.3f}')
+    plt.xlabel('Reference Chroma')
+    plt.ylabel('Recording Chroma')
+    plt.grid(True, alpha=0.3)
+    
+    # 7. Spectrograms comparison
+    plt.subplot(3, 3, 7)
+    D_reference = librosa.amplitude_to_db(np.abs(librosa.stft(y_reference)), ref=np.max)
+    librosa.display.specshow(D_reference, sr=sr, hop_length=512, x_axis='time', y_axis='hz')
+    plt.title('Reference Spectrogram')
+    plt.colorbar(format='%+2.0f dB')
+    
+    plt.subplot(3, 3, 8)
+    D_recording = librosa.amplitude_to_db(np.abs(librosa.stft(y_recording)), ref=np.max)
+    librosa.display.specshow(D_recording, sr=sr, hop_length=512, x_axis='time', y_axis='hz')
+    plt.title('Recording Spectrogram')
+    plt.colorbar(format='%+2.0f dB')
+    
+    # 8. Summary metrics
+    plt.subplot(3, 3, 9)
+    metrics = ['Correlation', 'Mean Cosine\nSimilarity', 'Similarity Score\n(inverted)']
+    values = [correlation, mean_cosine_similarity, 1 - (similarity_score if similarity_score < 1 else similarity_score/10)]  # Invert for visual consistency
+    colors = ['green' if v > 0.7 else 'orange' if v > 0.5 else 'red' for v in values]
+    
+    bars = plt.bar(metrics, values, color=colors, alpha=0.7)
+    plt.title('Similarity Metrics Summary')
+    plt.ylabel('Score (Higher = Better)')
+    plt.ylim(0, 1)
+    
+    # Add value labels on bars
+    for bar, value in zip(bars, values):
+        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02, 
+                f'{value:.3f}', ha='center', va='bottom')
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Print interpretation
+    print("\n" + "="*60)
+    print("INTERPRETATION:")
+    print("="*60)
+    
+    if np.isnan(mean_cosine_similarity):
+        print("⚠️  WARNING: Could not calculate cosine similarity (numerical issues)")
+        print("   This might indicate silent periods or very low energy in the audio")
+    elif mean_cosine_similarity > 0.8:
+        print("🟢 EXCELLENT similarity - Recording reproduces music very well")
+    elif mean_cosine_similarity > 0.7:
+        print("🟡 GOOD similarity - Recording reproduces music recognizably")
+    elif mean_cosine_similarity > 0.5:
+        print("🟠 MODERATE similarity - Some musical content preserved")
+    else:
+        print("🔴 LOW similarity - Significant differences in musical content")
+    
+    print(f"\nFor reference:")
+    print(f"- Perfect reproduction would give cosine similarity ≈ 1.0")
+    print(f"- Random noise would give cosine similarity ≈ 0.0") 
+    if not np.isnan(mean_cosine_similarity):
+        print(f"- Your result: {mean_cosine_similarity:.3f}")
+    else:
+        print(f"- Your result: Could not calculate (check for silence/low energy)")
+
+# Run the analysis
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('reference', help="reference audio file (speaker)")
+    parser.add_argument('recording', help="recording audio file (tesla coil)")
+    args = parser.parse_args()
+    result = analyze_accuracy(args.reference, args.recording)
