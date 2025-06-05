@@ -15,7 +15,7 @@ def find_audio_alignment(y1, y2, sr, max_offset_seconds=15):
     Find the best alignment between two audio signals using cross-correlation.
     Returns the offset in samples (positive means y2 starts later than y1).
     """
-    print("Finding audio alignment...")
+    # print("Finding audio alignment...")
     
     # Use shorter segments for faster computation (first 30 seconds)
     max_samples = int(30 * sr)
@@ -36,7 +36,7 @@ def find_audio_alignment(y1, y2, sr, max_offset_seconds=15):
         print(f"Warning: Large offset detected ({best_lag/sr:.2f}s), limiting to {max_offset_seconds}s")
         best_lag = np.clip(best_lag, -max_offset_samples, max_offset_samples)
     
-    print(f"Best alignment: {best_lag/sr:.3f} seconds offset")
+    # print(f"Best alignment: {best_lag/sr:.3f} seconds offset")
     return best_lag
 
 
@@ -51,12 +51,12 @@ def sync_and_trim_audio(y1, y2, sr):
         # y2 starts later than y1, so trim start of y1
         y1_synced = y1[offset:]
         y2_synced = y2.copy()
-        print(f"Trimmed {offset/sr:.3f}s from start of first audio")
+        print(f"Trimmed {offset/sr:.3f}s from start of first audio for best alignment")
     elif offset < 0:
         # y1 starts later than y2, so trim start of y2
         y1_synced = y1.copy()
         y2_synced = y2[-offset:]
-        print(f"Trimmed {-offset/sr:.3f}s from start of second audio")
+        print(f"Trimmed {-offset/sr:.3f}s from start of second audio for best alignment")
     else:
         # Already aligned
         y1_synced = y1.copy()
@@ -121,15 +121,25 @@ def calculate_harmonic_content_similarity(y_reference, y_recording, sr):
 
 
 def load_preprocess(reference_file, recording_file):
-    y_reference, sr = librosa.load(reference_file, sr=44100)
-    print(f"Loaded reference: {len(y_reference)} samples ({len(y_reference)/sr:.2f} seconds)")
+    y_reference, sr_ref = librosa.load(reference_file, sr=None)
+    print(f"Loaded reference: samplerate {sr_ref/1000:.1f} kHz, {len(y_reference)} samples ({len(y_reference)/sr_ref:.2f} seconds)")
 
 
-    y_recording, sr = librosa.load(recording_file, sr=44100)
-    print(f"Loaded recording: {len(y_recording)} samples ({len(y_recording)/sr:.2f} seconds)")
+    y_recording, sr_rec = librosa.load(recording_file, sr=None)
+    print(f"Loaded recording: , samplerate {sr_rec/1000:.1f} kHz, {len(y_recording)} samples ({len(y_recording)/sr_rec:.2f} seconds)")
+
+    target_sr = 44100
+    if sr_ref != target_sr:
+        print(f"Reference samplerate not 44.1 kHz, resampling...")
+        y_reference = librosa.resample(y_reference, orig_sr=sr_ref, target_sr=target_sr)
+    if sr_rec != target_sr:
+        print(f"Recording samplerate not 44.1 kHz, resampling...")
+        y_recording = librosa.resample(y_recording, orig_sr=sr_rec, target_sr=target_sr)
+    
+    sr = target_sr
 
 
-    print("Syncing and trimming files")
+    # print("Syncing and trimming files")
     y_reference, y_recording = sync_and_trim_audio(y_reference, y_recording, sr)
     
     # Normalize amplitude to remove differences in audio volume
@@ -143,15 +153,17 @@ def analyze_chroma(y_reference, y_recording, sr, reference_file, recording_file,
     # Using Nyquist's on the new rate we get a cutoff frequency of about 11 kHz (like a lowpass filter)
     # This means we'll ignore any freqs above that. Most melodies never touch above these frequencies, nor do ours.
     # The lowpass filter not only blocks out irrelevant freqs but also coil noise. We only do this for chroma analysis.
-    y_reference = librosa.resample(y_reference, orig_sr=sr, target_sr=22050)
-    y_recording = librosa.resample(y_recording, orig_sr=sr, target_sr=22050)
+    chroma_sr = sr/2
+
+    chroma_reference = librosa.resample(y_reference, orig_sr=sr, target_sr=chroma_sr)
+    chroma_recording = librosa.resample(y_recording, orig_sr=sr, target_sr=chroma_sr)
     
     # Extract chroma features using CENS
     # Mainly following one of their official articles:
     # https://librosa.org/doc/0.11.0/auto_examples/plot_chroma.html
-    chroma_reference = librosa.feature.chroma_cens(y=librosa.effects.harmonic(y_reference), sr=sr, hop_length=512)
-    chroma_recording = librosa.feature.chroma_cens(y=librosa.effects.harmonic(y_recording), sr=sr, hop_length=512)
-    print("Extracted chroma features")
+    chroma_reference = librosa.feature.chroma_cens(y=librosa.effects.harmonic(chroma_reference), sr=chroma_sr, hop_length=512)
+    chroma_recording = librosa.feature.chroma_cens(y=librosa.effects.harmonic(chroma_recording), sr=chroma_sr, hop_length=512)
+    # print("Extracted chroma features")
     
     # Use Dynamic Time Warping to account for timing variations
     # While we don't have a musician playing sheet music, whose timing might be imperfect,
@@ -159,7 +171,7 @@ def analyze_chroma(y_reference, y_recording, sr, reference_file, recording_file,
     # ESP32 -> driver -> transformer -> mosfet control -> arc formation by ionizing air
     alignment = dtw(chroma_reference.T, chroma_recording.T, distance_only=False)
     dtw_path = list(zip(alignment.index1, alignment.index2))
-    print("Calculated DTW alignment")
+    # print("Calculated DTW alignment")
     
     # Align using DTW
     path_array = np.array(dtw_path)
@@ -194,13 +206,17 @@ def analyze_chroma(y_reference, y_recording, sr, reference_file, recording_file,
 
     # Calculate supporting metrics
     timing_jitter = calculate_timing_jitter(dtw_path)
-    hop_time = 512 / sr  # Time per frame
+    hop_time = 512 / chroma_sr  # Time per frame
     timing_jitter_ms = timing_jitter * hop_time * 1000  # Convert to milliseconds
     
     harmonic_similarity, spectral_centroids = calculate_harmonic_content_similarity(y_reference, y_recording, sr)
-    
-    print(f"\nResults:")
-    print(f"PRIMARY METRIC:")
+
+    # Print results
+    print("\n" + "="*60)
+    print("TESLA COIL PERFORMANCE ANALYSIS")
+    print("="*60)
+
+    print(f"\nPRIMARY METRIC:")
     print(f"  Mean cosine similarity (DTW-aligned): {mean_cosine_similarity:.4f} (higher is better)")
     print(f"\nSUPPORTING METRICS:")
     print(f"  Timing jitter: {timing_jitter_ms:.2f} ms (lower is better)")
@@ -220,25 +236,31 @@ def create_analysis_plots(y_reference, y_recording, chroma_reference, chroma_rec
                          cosine_similarities, sr, mean_cosine_similarity, 
                          timing_jitter_ms, harmonic_similarity, spectral_centroids, reference_file, recording_file):
     
+
     fig = plt.figure(figsize=(16, 12))
-    
+
     # Time axis for audio
     time_audio = np.linspace(0, len(y_reference)/sr, len(y_reference))
     time_chroma = np.linspace(0, len(y_reference)/sr, chroma_reference.shape[1])
     time_cosine = np.linspace(0, len(y_reference)/sr, len(cosine_similarities))
-    
-    # 1. Waveform comparison (abs)
+
+
+    # 1. Waveform comparison (first 10s, or shorter if needed)
     plt.subplot(3, 3, 1)
-    plt.plot(time_audio[:sr*10], y_reference[:sr*10], alpha=0.7, label='reference', linewidth=0.5)
-    plt.plot(time_audio[:sr*10], y_recording[:sr*10], alpha=0.7, label='recording', linewidth=0.5)
-    plt.title('Waveform Comparison (First 10s)')
+    duration_to_plot = 10  # seconds
+    num_samples_10s = min(len(y_reference), int(duration_to_plot * sr))
+    time_audio_10s = np.linspace(0, num_samples_10s / sr, num_samples_10s)
+
+    plt.plot(time_audio_10s, y_reference[:num_samples_10s], alpha=0.7, label='reference', linewidth=0.5)
+    plt.plot(time_audio_10s, y_recording[:num_samples_10s], alpha=0.7, label='recording', linewidth=0.5)
+    plt.title(f'Waveform Comparison (First {duration_to_plot}s)')
     plt.xlabel('Time (s)')
-    plt.ylabel('Amplitude')
-    plt.xlim(0, 10)
-    plt.xticks(range(0, 11))
+    plt.ylabel('Amplitude (normalized)')
+    plt.xlim(0, duration_to_plot)
+    plt.xticks(range(0, duration_to_plot + 1))
     plt.legend()
     plt.grid(True, alpha=0.3)
-    
+
     # 2. Chroma features - reference (first 10s)
     plt.subplot(3, 3, 2)
     frames_10s = int(10 * sr / 512)
@@ -284,7 +306,7 @@ def create_analysis_plots(y_reference, y_recording, chroma_reference, chroma_rec
     plt.title('Spectral Centroid (Brightness)')
     plt.xlabel('Time (s)')
     plt.ylabel('Frequency (Hz)')
-    plt.ylim(0, int(np.ceil(sr/2))) # take nyquist value aka max freq we can analyze
+    plt.ylim(0, None)
     plt.xlim(0, time_cent[-1])
     # plt.xticks(range(0, 11))
     plt.legend()
@@ -337,55 +359,6 @@ def create_analysis_plots(y_reference, y_recording, chroma_reference, chroma_rec
 
     plt.savefig(f'allresults_{reference_file}_{recording_file}.png', dpi=400)
     plt.show()
-    
-    # Print results
-    print("\n" + "="*60)
-    print("TESLA COIL PERFORMANCE ANALYSIS:")
-    print("="*60)
-    
-    if np.isnan(mean_cosine_similarity):
-        print("⚠️  WARNING: Could not calculate melody similarity (numerical issues)")
-        print("   This might indicate silent periods or very low energy in the audio")
-    elif mean_cosine_similarity > 0.8:
-        print("🟢 EXCELLENT melody reproduction - Tesla coil reproduces music very well")
-    elif mean_cosine_similarity > 0.7:
-        print("🟡 GOOD melody reproduction - Tesla coil reproduces music recognizably")
-    elif mean_cosine_similarity > 0.5:
-        print("🟠 MODERATE melody reproduction - Some musical content preserved")
-    else:
-        print("🔴 LOW melody reproduction - Significant differences in musical content")
-    
-    # Timing analysis
-    if timing_jitter_ms < 50:
-        print("🟢 EXCELLENT timing consistency")
-    elif timing_jitter_ms < 150:
-        print("🟡 GOOD timing consistency")
-    elif timing_jitter_ms < 300:
-        print("🟠 MODERATE timing consistency - some timing drift")
-    else:
-        print("🔴 POOR timing consistency - significant timing variations")
-    
-    # Harmonic analysis
-    if harmonic_similarity > 0.9:
-        print("🟢 EXCELLENT harmonic content preservation")
-    elif harmonic_similarity > 0.7:
-        print("🟡 GOOD harmonic content preservation")
-    elif harmonic_similarity > 0.5:
-        print("🟠 MODERATE harmonic content preservation")
-    else:
-        print("🔴 LOW harmonic content preservation")
-    
-    print(f"\nFor reference:")
-    print(f"- Perfect melody reproduction would give similarity ≈ 1.0")
-    print(f"- Perfect timing would give jitter ≈ 0 ms")
-    print(f"- Perfect harmonic preservation would give similarity ≈ 1.0")
-    if not np.isnan(mean_cosine_similarity):
-        print(f"\nYour Tesla coil results:")
-        print(f"- Melody similarity: {mean_cosine_similarity:.3f}")
-        print(f"- Timing jitter: {timing_jitter_ms:.1f} ms")
-        print(f"- Harmonic similarity: {harmonic_similarity:.3f}")
-    else:
-        print(f"- Your result: Could not calculate (check for silence/low energy)")
 
 # Run the analysis
 if __name__ == "__main__":
